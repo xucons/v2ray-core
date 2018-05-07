@@ -2,62 +2,48 @@ package tcp
 
 import (
 	"context"
-	"crypto/tls"
-	"net"
 
-	"v2ray.com/core/app/log"
 	"v2ray.com/core/common"
-	"v2ray.com/core/common/errors"
-	v2net "v2ray.com/core/common/net"
+	"v2ray.com/core/common/net"
 	"v2ray.com/core/transport/internet"
-	"v2ray.com/core/transport/internet/internal"
-	v2tls "v2ray.com/core/transport/internet/tls"
+	"v2ray.com/core/transport/internet/tls"
 )
 
-var (
-	globalCache = internal.NewConnectionPool()
-)
+func getTCPSettingsFromContext(ctx context.Context) *Config {
+	rawTCPSettings := internet.TransportSettingsFromContext(ctx)
+	if rawTCPSettings == nil {
+		return nil
+	}
+	return rawTCPSettings.(*Config)
+}
 
-func Dial(ctx context.Context, dest v2net.Destination) (internet.Connection, error) {
-	log.Info("Internet|TCP: Dailing TCP to ", dest)
+// Dial dials a new TCP connection to the given destination.
+func Dial(ctx context.Context, dest net.Destination) (internet.Connection, error) {
+	newError("dialing TCP to ", dest).WithContext(ctx).WriteToLog()
 	src := internet.DialerSourceFromContext(ctx)
 
-	tcpSettings := internet.TransportSettingsFromContext(ctx).(*Config)
+	conn, err := internet.DialSystem(ctx, src, dest)
+	if err != nil {
+		return nil, err
+	}
 
-	id := internal.NewConnectionID(src, dest)
-	var conn net.Conn
-	if dest.Network == v2net.Network_TCP && tcpSettings.IsConnectionReuse() {
-		conn = globalCache.Get(id)
+	if config := tls.ConfigFromContext(ctx); config != nil {
+		conn = tls.Client(conn, config.GetTLSConfig(tls.WithDestination(dest), tls.WithNextProto("h2")))
 	}
-	if conn == nil {
-		var err error
-		conn, err = internet.DialSystem(src, dest)
+
+	tcpSettings := getTCPSettingsFromContext(ctx)
+	if tcpSettings != nil && tcpSettings.HeaderSettings != nil {
+		headerConfig, err := tcpSettings.HeaderSettings.GetInstance()
 		if err != nil {
-			return nil, err
+			return nil, newError("failed to get header settings").Base(err).AtError()
 		}
-		if securitySettings := internet.SecuritySettingsFromContext(ctx); securitySettings != nil {
-			tlsConfig, ok := securitySettings.(*v2tls.Config)
-			if ok {
-				config := tlsConfig.GetTLSConfig()
-				if dest.Address.Family().IsDomain() {
-					config.ServerName = dest.Address.Domain()
-				}
-				conn = tls.Client(conn, config)
-			}
+		auth, err := internet.CreateConnectionAuthenticator(headerConfig)
+		if err != nil {
+			return nil, newError("failed to create header authenticator").Base(err).AtError()
 		}
-		if tcpSettings.HeaderSettings != nil {
-			headerConfig, err := tcpSettings.HeaderSettings.GetInstance()
-			if err != nil {
-				return nil, errors.Base(err).Message("Internet|TCP: Failed to get header settings.")
-			}
-			auth, err := internet.CreateConnectionAuthenticator(headerConfig)
-			if err != nil {
-				return nil, errors.Base(err).Message("Internet|TCP: Failed to create header authenticator.")
-			}
-			conn = auth.Client(conn)
-		}
+		conn = auth.Client(conn)
 	}
-	return internal.NewConnection(id, conn, globalCache, internal.ReuseConnection(tcpSettings.IsConnectionReuse())), nil
+	return internet.Connection(conn), nil
 }
 
 func init() {

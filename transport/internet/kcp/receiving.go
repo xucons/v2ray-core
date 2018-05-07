@@ -20,38 +20,42 @@ func NewReceivingWindow(size uint32) *ReceivingWindow {
 	}
 }
 
-func (v *ReceivingWindow) Size() uint32 {
-	return v.size
+func (w *ReceivingWindow) Size() uint32 {
+	return w.size
 }
 
-func (v *ReceivingWindow) Position(idx uint32) uint32 {
-	return (idx + v.start) % v.size
+func (w *ReceivingWindow) Position(idx uint32) uint32 {
+	return (idx + w.start) % w.size
 }
 
-func (v *ReceivingWindow) Set(idx uint32, value *DataSegment) bool {
-	pos := v.Position(idx)
-	if v.list[pos] != nil {
+func (w *ReceivingWindow) Set(idx uint32, value *DataSegment) bool {
+	pos := w.Position(idx)
+	if w.list[pos] != nil {
 		return false
 	}
-	v.list[pos] = value
+	w.list[pos] = value
 	return true
 }
 
-func (v *ReceivingWindow) Remove(idx uint32) *DataSegment {
-	pos := v.Position(idx)
-	e := v.list[pos]
-	v.list[pos] = nil
+func (w *ReceivingWindow) Remove(idx uint32) *DataSegment {
+	pos := w.Position(idx)
+	e := w.list[pos]
+	w.list[pos] = nil
 	return e
 }
 
-func (v *ReceivingWindow) RemoveFirst() *DataSegment {
-	return v.Remove(0)
+func (w *ReceivingWindow) RemoveFirst() *DataSegment {
+	return w.Remove(0)
 }
 
-func (v *ReceivingWindow) Advance() {
-	v.start++
-	if v.start == v.size {
-		v.start = 0
+func (w *ReceivingWindow) HasFirst() bool {
+	return w.list[w.Position(0)] != nil
+}
+
+func (w *ReceivingWindow) Advance() {
+	w.start++
+	if w.start == w.size {
+		w.start = 0
 	}
 }
 
@@ -75,77 +79,77 @@ func NewAckList(writer SegmentWriter) *AckList {
 	}
 }
 
-func (v *AckList) Add(number uint32, timestamp uint32) {
-	v.timestamps = append(v.timestamps, timestamp)
-	v.numbers = append(v.numbers, number)
-	v.nextFlush = append(v.nextFlush, 0)
-	v.dirty = true
+func (l *AckList) Add(number uint32, timestamp uint32) {
+	l.timestamps = append(l.timestamps, timestamp)
+	l.numbers = append(l.numbers, number)
+	l.nextFlush = append(l.nextFlush, 0)
+	l.dirty = true
 }
 
-func (v *AckList) Clear(una uint32) {
+func (l *AckList) Clear(una uint32) {
 	count := 0
-	for i := 0; i < len(v.numbers); i++ {
-		if v.numbers[i] < una {
+	for i := 0; i < len(l.numbers); i++ {
+		if l.numbers[i] < una {
 			continue
 		}
 		if i != count {
-			v.numbers[count] = v.numbers[i]
-			v.timestamps[count] = v.timestamps[i]
-			v.nextFlush[count] = v.nextFlush[i]
+			l.numbers[count] = l.numbers[i]
+			l.timestamps[count] = l.timestamps[i]
+			l.nextFlush[count] = l.nextFlush[i]
 		}
 		count++
 	}
-	if count < len(v.numbers) {
-		v.numbers = v.numbers[:count]
-		v.timestamps = v.timestamps[:count]
-		v.nextFlush = v.nextFlush[:count]
-		v.dirty = true
+	if count < len(l.numbers) {
+		l.numbers = l.numbers[:count]
+		l.timestamps = l.timestamps[:count]
+		l.nextFlush = l.nextFlush[:count]
+		l.dirty = true
 	}
 }
 
-func (v *AckList) Flush(current uint32, rto uint32) {
-	v.flushCandidates = v.flushCandidates[:0]
+func (l *AckList) Flush(current uint32, rto uint32) {
+	l.flushCandidates = l.flushCandidates[:0]
 
 	seg := NewAckSegment()
-	for i := 0; i < len(v.numbers); i++ {
-		if v.nextFlush[i] > current {
-			if len(v.flushCandidates) < cap(v.flushCandidates) {
-				v.flushCandidates = append(v.flushCandidates, v.numbers[i])
+	for i := 0; i < len(l.numbers); i++ {
+		if l.nextFlush[i] > current {
+			if len(l.flushCandidates) < cap(l.flushCandidates) {
+				l.flushCandidates = append(l.flushCandidates, l.numbers[i])
 			}
 			continue
 		}
-		seg.PutNumber(v.numbers[i])
-		seg.PutTimestamp(v.timestamps[i])
+		seg.PutNumber(l.numbers[i])
+		seg.PutTimestamp(l.timestamps[i])
 		timeout := rto / 2
 		if timeout < 20 {
 			timeout = 20
 		}
-		v.nextFlush[i] = current + timeout
+		l.nextFlush[i] = current + timeout
 
 		if seg.IsFull() {
-			v.writer.Write(seg)
+			l.writer.Write(seg)
 			seg.Release()
 			seg = NewAckSegment()
-			v.dirty = false
+			l.dirty = false
 		}
 	}
-	if v.dirty || !seg.IsEmpty() {
-		for _, number := range v.flushCandidates {
+	if l.dirty || !seg.IsEmpty() {
+		for _, number := range l.flushCandidates {
 			if seg.IsFull() {
 				break
 			}
 			seg.PutNumber(number)
 		}
-		v.writer.Write(seg)
+		l.writer.Write(seg)
 		seg.Release()
-		v.dirty = false
+		l.dirty = false
 	}
 }
 
 type ReceivingWorker struct {
 	sync.RWMutex
 	conn       *Connection
-	leftOver   *buf.Buffer
+	leftOver   buf.MultiBuffer
 	window     *ReceivingWindow
 	acklist    *AckList
 	nextNumber uint32
@@ -162,93 +166,107 @@ func NewReceivingWorker(kcp *Connection) *ReceivingWorker {
 	return worker
 }
 
-func (v *ReceivingWorker) Release() {
-	v.leftOver.Release()
+func (w *ReceivingWorker) Release() {
+	w.Lock()
+	w.leftOver.Release()
+	w.Unlock()
 }
 
-func (v *ReceivingWorker) ProcessSendingNext(number uint32) {
-	v.Lock()
-	defer v.Unlock()
+func (w *ReceivingWorker) ProcessSendingNext(number uint32) {
+	w.Lock()
+	defer w.Unlock()
 
-	v.acklist.Clear(number)
+	w.acklist.Clear(number)
 }
 
-func (v *ReceivingWorker) ProcessSegment(seg *DataSegment) {
-	v.Lock()
-	defer v.Unlock()
+func (w *ReceivingWorker) ProcessSegment(seg *DataSegment) {
+	w.Lock()
+	defer w.Unlock()
 
 	number := seg.Number
-	idx := number - v.nextNumber
-	if idx >= v.windowSize {
+	idx := number - w.nextNumber
+	if idx >= w.windowSize {
 		return
 	}
-	v.acklist.Clear(seg.SendingNext)
-	v.acklist.Add(number, seg.Timestamp)
+	w.acklist.Clear(seg.SendingNext)
+	w.acklist.Add(number, seg.Timestamp)
 
-	if !v.window.Set(idx, seg) {
+	if !w.window.Set(idx, seg) {
 		seg.Release()
 	}
 }
 
-func (v *ReceivingWorker) Read(b []byte) int {
-	v.Lock()
-	defer v.Unlock()
-
-	total := 0
-	if v.leftOver != nil {
-		nBytes := copy(b, v.leftOver.Bytes())
-		if nBytes < v.leftOver.Len() {
-			v.leftOver.SliceFrom(nBytes)
-			return nBytes
-		}
-		v.leftOver.Release()
-		v.leftOver = nil
-		total += nBytes
+func (w *ReceivingWorker) ReadMultiBuffer() buf.MultiBuffer {
+	if w.leftOver != nil {
+		mb := w.leftOver
+		w.leftOver = nil
+		return mb
 	}
 
-	for total < len(b) {
-		seg := v.window.RemoveFirst()
+	mb := buf.NewMultiBufferCap(32)
+
+	w.Lock()
+	defer w.Unlock()
+	for {
+		seg := w.window.RemoveFirst()
 		if seg == nil {
 			break
 		}
-		v.window.Advance()
-		v.nextNumber++
-
-		nBytes := copy(b[total:], seg.Data.Bytes())
-		total += nBytes
-		if nBytes < seg.Data.Len() {
-			seg.Data.SliceFrom(nBytes)
-			v.leftOver = seg.Data
-			seg.Data = nil
-			seg.Release()
-			break
-		}
+		w.window.Advance()
+		w.nextNumber++
+		mb.Append(seg.Detach())
 		seg.Release()
 	}
-	return total
+
+	return mb
 }
 
-func (v *ReceivingWorker) Flush(current uint32) {
-	v.Lock()
-	defer v.Unlock()
-
-	v.acklist.Flush(current, v.conn.roundTrip.Timeout())
+func (w *ReceivingWorker) Read(b []byte) int {
+	mb := w.ReadMultiBuffer()
+	nBytes, _ := mb.Read(b)
+	if !mb.IsEmpty() {
+		w.leftOver = mb
+	}
+	return nBytes
 }
 
-func (v *ReceivingWorker) Write(seg Segment) error {
+func (w *ReceivingWorker) IsDataAvailable() bool {
+	w.RLock()
+	defer w.RUnlock()
+	return w.window.HasFirst()
+}
+
+func (w *ReceivingWorker) NextNumber() uint32 {
+	w.RLock()
+	defer w.RUnlock()
+
+	return w.nextNumber
+}
+
+func (w *ReceivingWorker) Flush(current uint32) {
+	w.Lock()
+	defer w.Unlock()
+
+	w.acklist.Flush(current, w.conn.roundTrip.Timeout())
+}
+
+func (w *ReceivingWorker) Write(seg Segment) error {
 	ackSeg := seg.(*AckSegment)
-	ackSeg.Conv = v.conn.conv
-	ackSeg.ReceivingNext = v.nextNumber
-	ackSeg.ReceivingWindow = v.nextNumber + v.windowSize
-	if v.conn.state == StateReadyToClose {
+	ackSeg.Conv = w.conn.meta.Conversation
+	ackSeg.ReceivingNext = w.nextNumber
+	ackSeg.ReceivingWindow = w.nextNumber + w.windowSize
+	if w.conn.State() == StateReadyToClose {
 		ackSeg.Option = SegmentOptionClose
 	}
-	return v.conn.output.Write(ackSeg)
+	return w.conn.output.Write(ackSeg)
 }
 
-func (v *ReceivingWorker) CloseRead() {
+func (*ReceivingWorker) CloseRead() {
 }
 
-func (v *ReceivingWorker) UpdateNecessary() bool {
-	return len(v.acklist.numbers) > 0
+func (w *ReceivingWorker) UpdateNecessary() bool {
+	w.RLock()
+	defer w.RUnlock()
+
+	return len(w.acklist.numbers) > 0
 }

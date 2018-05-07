@@ -1,40 +1,119 @@
 package mux
 
-import "v2ray.com/core/common/buf"
-import "v2ray.com/core/common/serial"
+import (
+	"v2ray.com/core/common"
+	"v2ray.com/core/common/buf"
+	"v2ray.com/core/common/net"
+	"v2ray.com/core/common/protocol"
+	"v2ray.com/core/common/serial"
+)
 
-type muxWriter struct {
-	meta   *FrameMetadata
-	writer buf.Writer
+type Writer struct {
+	dest         net.Destination
+	writer       buf.Writer
+	id           uint16
+	followup     bool
+	hasError     bool
+	transferType protocol.TransferType
 }
 
-func (w *muxWriter) Write(b *buf.Buffer) error {
+func NewWriter(id uint16, dest net.Destination, writer buf.Writer, transferType protocol.TransferType) *Writer {
+	return &Writer{
+		id:           id,
+		dest:         dest,
+		writer:       writer,
+		followup:     false,
+		transferType: transferType,
+	}
+}
+
+func NewResponseWriter(id uint16, writer buf.Writer, transferType protocol.TransferType) *Writer {
+	return &Writer{
+		id:           id,
+		writer:       writer,
+		followup:     true,
+		transferType: transferType,
+	}
+}
+
+func (w *Writer) getNextFrameMeta() FrameMetadata {
+	meta := FrameMetadata{
+		SessionID: w.id,
+		Target:    w.dest,
+	}
+
+	if w.followup {
+		meta.SessionStatus = SessionStatusKeep
+	} else {
+		w.followup = true
+		meta.SessionStatus = SessionStatusNew
+	}
+
+	return meta
+}
+
+func (w *Writer) writeMetaOnly() error {
+	meta := w.getNextFrameMeta()
+	b := buf.New()
+	if err := meta.WriteTo(b); err != nil {
+		return err
+	}
+	return w.writer.WriteMultiBuffer(buf.NewMultiBufferValue(b))
+}
+
+func (w *Writer) writeData(mb buf.MultiBuffer) error {
+	meta := w.getNextFrameMeta()
+	meta.Option.Set(OptionData)
+
 	frame := buf.New()
-	frame.AppendSupplier(w.meta.AsSupplier())
-	if w.meta.SessionStatus == SessionStatusNew {
-		w.meta.SessionStatus = SessionStatusKeep
+	if err := meta.WriteTo(frame); err != nil {
+		return err
 	}
-
-	frame.AppendSupplier(serial.WriteUint16(0))
-	lengthBytes := frame.BytesFrom(-2)
-
-	nBytes, err := frame.Write(b.Bytes())
-	if err != nil {
+	if err := frame.AppendSupplier(serial.WriteUint16(uint16(mb.Len()))); err != nil {
 		return err
 	}
 
-	serial.Uint16ToBytes(uint16(nBytes), lengthBytes[:0])
-	if err := w.writer.Write(frame); err != nil {
-		frame.Release()
-		b.Release()
-		return err
+	mb2 := buf.NewMultiBufferCap(int32(len(mb)) + 1)
+	mb2.Append(frame)
+	mb2.AppendMulti(mb)
+	return w.writer.WriteMultiBuffer(mb2)
+}
+
+// WriteMultiBuffer implements buf.Writer.
+func (w *Writer) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	defer mb.Release()
+
+	if mb.IsEmpty() {
+		return w.writeMetaOnly()
 	}
 
-	b.SliceFrom(nBytes)
-	if !b.IsEmpty() {
-		return w.Write(b)
+	for !mb.IsEmpty() {
+		var chunk buf.MultiBuffer
+		if w.transferType == protocol.TransferTypeStream {
+			chunk = mb.SliceBySize(8 * 1024)
+		} else {
+			chunk = buf.NewMultiBufferValue(mb.SplitFirst())
+		}
+		if err := w.writeData(chunk); err != nil {
+			return err
+		}
 	}
-	b.Release()
 
+	return nil
+}
+
+func (w *Writer) Close() error {
+	meta := FrameMetadata{
+		SessionID:     w.id,
+		SessionStatus: SessionStatusEnd,
+	}
+	if w.hasError {
+		meta.Option.Set(OptionError)
+	}
+
+	frame := buf.New()
+	common.Must(meta.WriteTo(frame))
+
+	w.writer.WriteMultiBuffer(buf.NewMultiBufferValue(frame))
 	return nil
 }

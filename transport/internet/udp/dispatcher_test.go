@@ -6,45 +6,56 @@ import (
 	"testing"
 	"time"
 
+	"v2ray.com/core"
 	"v2ray.com/core/common/buf"
-	v2net "v2ray.com/core/common/net"
-	"v2ray.com/core/testing/assert"
+	"v2ray.com/core/common/net"
 	. "v2ray.com/core/transport/internet/udp"
-	"v2ray.com/core/transport/ray"
+	"v2ray.com/core/transport/pipe"
+	. "v2ray.com/ext/assert"
 )
 
 type TestDispatcher struct {
-	OnDispatch func(ctx context.Context, dest v2net.Destination) (ray.InboundRay, error)
+	OnDispatch func(ctx context.Context, dest net.Destination) (*core.Link, error)
 }
 
-func (d *TestDispatcher) Dispatch(ctx context.Context, dest v2net.Destination) (ray.InboundRay, error) {
+func (d *TestDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*core.Link, error) {
 	return d.OnDispatch(ctx, dest)
 }
 
+func (d *TestDispatcher) Start() error {
+	return nil
+}
+
+func (d *TestDispatcher) Close() error {
+	return nil
+}
+
 func TestSameDestinationDispatching(t *testing.T) {
-	assert := assert.On(t)
+	assert := With(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	link := ray.NewRay(ctx)
+	uplinkReader, uplinkWriter := pipe.New()
+	downlinkReader, downlinkWriter := pipe.New()
+
 	go func() {
 		for {
-			data, err := link.OutboundInput().Read()
+			data, err := uplinkReader.ReadMultiBuffer()
 			if err != nil {
 				break
 			}
-			err = link.OutboundOutput().Write(data)
-			assert.Error(err).IsNil()
+			err = downlinkWriter.WriteMultiBuffer(data)
+			assert(err, IsNil)
 		}
 	}()
 
 	var count uint32
 	td := &TestDispatcher{
-		OnDispatch: func(ctx context.Context, dest v2net.Destination) (ray.InboundRay, error) {
+		OnDispatch: func(ctx context.Context, dest net.Destination) (*core.Link, error) {
 			atomic.AddUint32(&count, 1)
-			return link, nil
+			return &core.Link{Reader: downlinkReader, Writer: uplinkWriter}, nil
 		},
 	}
-	dest := v2net.UDPDestination(v2net.LocalHostIP, 53)
+	dest := net.UDPDestination(net.LocalHostIP, 53)
 
 	b := buf.New()
 	b.AppendBytes('a', 'b', 'c', 'd')
@@ -60,6 +71,6 @@ func TestSameDestinationDispatching(t *testing.T) {
 	time.Sleep(time.Second)
 	cancel()
 
-	assert.Uint32(count).Equals(1)
-	assert.Uint32(msgCount).Equals(6)
+	assert(count, Equals, uint32(1))
+	assert(msgCount, Equals, uint32(6))
 }

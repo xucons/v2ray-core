@@ -1,9 +1,10 @@
 package http
 
+//go:generate go run $GOPATH/src/v2ray.com/core/common/errors/errorgen/main.go -pkg http -path Transport,Internet,Headers,HTTP
+
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -16,7 +17,10 @@ import (
 )
 
 const (
-	CRLF   = "\r\n"
+	// CRLF is the line ending in HTTP header
+	CRLF = "\r\n"
+
+	// ENDING is the double line ending between HTTP header and body.
 	ENDING = CRLF + CRLF
 
 	// max length of HTTP header. Safety precaution for DDoS attack.
@@ -24,7 +28,7 @@ const (
 )
 
 var (
-	ErrHeaderToLong = errors.New("Header too long.")
+	ErrHeaderToLong = newError("Header too long.")
 	writeCRLF       = serial.WriteString(CRLF)
 )
 
@@ -38,13 +42,13 @@ type Writer interface {
 
 type NoOpReader struct{}
 
-func (v *NoOpReader) Read(io.Reader) (*buf.Buffer, error) {
+func (NoOpReader) Read(io.Reader) (*buf.Buffer, error) {
 	return nil, nil
 }
 
 type NoOpWriter struct{}
 
-func (v *NoOpWriter) Write(io.Writer) error {
+func (NoOpWriter) Write(io.Writer) error {
 	return nil
 }
 
@@ -52,22 +56,23 @@ type HeaderReader struct {
 }
 
 func (*HeaderReader) Read(reader io.Reader) (*buf.Buffer, error) {
-	buffer := buf.NewSmall()
-	totalBytes := 0
+	buffer := buf.New()
+	totalBytes := int32(0)
 	endingDetected := false
 	for totalBytes < maxHeaderLength {
 		err := buffer.AppendSupplier(buf.ReadFrom(reader))
 		if err != nil {
+			buffer.Release()
 			return nil, err
 		}
 		if n := bytes.Index(buffer.Bytes(), []byte(ENDING)); n != -1 {
-			buffer.SliceFrom(n + len(ENDING))
+			buffer.Advance(int32(n + len(ENDING)))
 			endingDetected = true
 			break
 		}
-		if buffer.Len() >= len(ENDING) {
-			totalBytes += buffer.Len() - len(ENDING)
-			leftover := buffer.BytesFrom(-len(ENDING))
+		if buffer.Len() >= int32(len(ENDING)) {
+			totalBytes += buffer.Len() - int32(len(ENDING))
+			leftover := buffer.BytesFrom(-int32(len(ENDING)))
 			buffer.Reset(func(b []byte) (int, error) {
 				return copy(b, leftover), nil
 			})
@@ -94,13 +99,13 @@ func NewHeaderWriter(header *buf.Buffer) *HeaderWriter {
 	}
 }
 
-func (v *HeaderWriter) Write(writer io.Writer) error {
-	if v.header == nil {
+func (w *HeaderWriter) Write(writer io.Writer) error {
+	if w.header == nil {
 		return nil
 	}
-	_, err := writer.Write(v.header.Bytes())
-	v.header.Release()
-	v.header = nil
+	_, err := writer.Write(w.header.Bytes())
+	w.header.Release()
+	w.header = nil
 	return err
 }
 
@@ -122,53 +127,54 @@ func NewHttpConn(conn net.Conn, reader Reader, writer Writer, errorWriter Writer
 	}
 }
 
-func (v *HttpConn) Read(b []byte) (int, error) {
-	if v.oneTimeReader != nil {
-		buffer, err := v.oneTimeReader.Read(v.Conn)
+func (c *HttpConn) Read(b []byte) (int, error) {
+	if c.oneTimeReader != nil {
+		buffer, err := c.oneTimeReader.Read(c.Conn)
 		if err != nil {
 			return 0, err
 		}
-		v.readBuffer = buffer
-		v.oneTimeReader = nil
+		c.readBuffer = buffer
+		c.oneTimeReader = nil
 	}
 
-	if v.readBuffer.Len() > 0 {
-		nBytes, err := v.readBuffer.Read(b)
-		if nBytes == v.readBuffer.Len() {
-			v.readBuffer.Release()
-			v.readBuffer = nil
+	if !c.readBuffer.IsEmpty() {
+		nBytes, _ := c.readBuffer.Read(b)
+		if c.readBuffer.IsEmpty() {
+			c.readBuffer.Release()
+			c.readBuffer = nil
 		}
-		return nBytes, err
+		return nBytes, nil
 	}
 
-	return v.Conn.Read(b)
+	return c.Conn.Read(b)
 }
 
-func (v *HttpConn) Write(b []byte) (int, error) {
-	if v.oneTimeWriter != nil {
-		err := v.oneTimeWriter.Write(v.Conn)
-		v.oneTimeWriter = nil
+// Write implements io.Writer.
+func (c *HttpConn) Write(b []byte) (int, error) {
+	if c.oneTimeWriter != nil {
+		err := c.oneTimeWriter.Write(c.Conn)
+		c.oneTimeWriter = nil
 		if err != nil {
 			return 0, err
 		}
 	}
 
-	return v.Conn.Write(b)
+	return c.Conn.Write(b)
 }
 
 // Close implements net.Conn.Close().
-func (v *HttpConn) Close() error {
-	if v.oneTimeWriter != nil && v.errorWriter != nil {
+func (c *HttpConn) Close() error {
+	if c.oneTimeWriter != nil && c.errorWriter != nil {
 		// Connection is being closed but header wasn't sent. This means the client request
 		// is probably not valid. Sending back a server error header in this case.
-		v.errorWriter.Write(v.Conn)
+		c.errorWriter.Write(c.Conn)
 	}
 
-	return v.Conn.Close()
+	return c.Conn.Close()
 }
 
 func formResponseHeader(config *ResponseConfig) *HeaderWriter {
-	header := buf.NewSmall()
+	header := buf.New()
 	header.AppendSupplier(serial.WriteString(strings.Join([]string{config.GetFullVersion(), config.GetStatusValue().Code, config.GetStatusValue().Reason}, " ")))
 	header.AppendSupplier(writeCRLF)
 
@@ -192,9 +198,9 @@ type HttpAuthenticator struct {
 	config *Config
 }
 
-func (v HttpAuthenticator) GetClientWriter() *HeaderWriter {
-	header := buf.NewSmall()
-	config := v.config.Request
+func (a HttpAuthenticator) GetClientWriter() *HeaderWriter {
+	header := buf.New()
+	config := a.config.Request
 	header.AppendSupplier(serial.WriteString(strings.Join([]string{config.GetMethodValue(), config.PickUri(), config.GetFullVersion()}, " ")))
 	header.AppendSupplier(writeCRLF)
 
@@ -209,31 +215,31 @@ func (v HttpAuthenticator) GetClientWriter() *HeaderWriter {
 	}
 }
 
-func (v HttpAuthenticator) GetServerWriter() *HeaderWriter {
-	return formResponseHeader(v.config.Response)
+func (a HttpAuthenticator) GetServerWriter() *HeaderWriter {
+	return formResponseHeader(a.config.Response)
 }
 
-func (v HttpAuthenticator) Client(conn net.Conn) net.Conn {
-	if v.config.Request == nil && v.config.Response == nil {
+func (a HttpAuthenticator) Client(conn net.Conn) net.Conn {
+	if a.config.Request == nil && a.config.Response == nil {
 		return conn
 	}
-	var reader Reader = new(NoOpReader)
-	if v.config.Request != nil {
+	var reader Reader = NoOpReader{}
+	if a.config.Request != nil {
 		reader = new(HeaderReader)
 	}
 
-	var writer Writer = new(NoOpWriter)
-	if v.config.Response != nil {
-		writer = v.GetClientWriter()
+	var writer Writer = NoOpWriter{}
+	if a.config.Response != nil {
+		writer = a.GetClientWriter()
 	}
-	return NewHttpConn(conn, reader, writer, new(NoOpWriter))
+	return NewHttpConn(conn, reader, writer, NoOpWriter{})
 }
 
-func (v HttpAuthenticator) Server(conn net.Conn) net.Conn {
-	if v.config.Request == nil && v.config.Response == nil {
+func (a HttpAuthenticator) Server(conn net.Conn) net.Conn {
+	if a.config.Request == nil && a.config.Response == nil {
 		return conn
 	}
-	return NewHttpConn(conn, new(HeaderReader), v.GetServerWriter(), formResponseHeader(&ResponseConfig{
+	return NewHttpConn(conn, new(HeaderReader), a.GetServerWriter(), formResponseHeader(&ResponseConfig{
 		Version: &Version{
 			Value: "1.1",
 		},

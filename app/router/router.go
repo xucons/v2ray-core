@@ -1,70 +1,88 @@
 package router
 
+//go:generate go run $GOPATH/src/v2ray.com/core/common/errors/errorgen/main.go -pkg router -path App,Router
+
 import (
 	"context"
 
-	"v2ray.com/core/app"
-	"v2ray.com/core/app/dns"
-	"v2ray.com/core/app/log"
+	"v2ray.com/core"
 	"v2ray.com/core/common"
-	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/proxy"
 )
 
-var (
-	ErrNoRuleApplicable = errors.New("No rule applicable")
-)
-
+// Router is an implementation of core.Router.
 type Router struct {
 	domainStrategy Config_DomainStrategy
 	rules          []Rule
-	dnsServer      dns.Server
+	dns            core.DNSClient
 }
 
+// NewRouter creates a new Router based on the given config.
 func NewRouter(ctx context.Context, config *Config) (*Router, error) {
-	space := app.SpaceFromContext(ctx)
-	if space == nil {
-		return nil, errors.New("Router: No space in context.")
-	}
+	v := core.MustFromContext(ctx)
 	r := &Router{
 		domainStrategy: config.DomainStrategy,
 		rules:          make([]Rule, len(config.Rule)),
+		dns:            v.DNSClient(),
 	}
 
-	space.OnInitialize(func() error {
-		for idx, rule := range config.Rule {
-			r.rules[idx].Tag = rule.Tag
-			cond, err := rule.BuildCondition()
-			if err != nil {
-				return err
-			}
-			r.rules[idx].Condition = cond
+	for idx, rule := range config.Rule {
+		r.rules[idx].Tag = rule.Tag
+		cond, err := rule.BuildCondition()
+		if err != nil {
+			return nil, err
 		}
+		r.rules[idx].Condition = cond
+	}
 
-		r.dnsServer = dns.FromSpace(space)
-		if r.dnsServer == nil {
-			return errors.New("Router: DNS is not found in the space.")
-		}
-		return nil
-	})
+	if err := v.RegisterFeature((*core.Router)(nil), r); err != nil {
+		return nil, newError("unable to register Router").Base(err)
+	}
 	return r, nil
 }
 
-func (v *Router) resolveIP(dest net.Destination) []net.Address {
-	ips := v.dnsServer.Get(dest.Address.Domain())
+type ipResolver struct {
+	dns      core.DNSClient
+	ip       []net.Address
+	domain   string
+	resolved bool
+}
+
+func (r *ipResolver) Resolve() []net.Address {
+	if r.resolved {
+		return r.ip
+	}
+
+	newError("looking for IP for domain: ", r.domain).WriteToLog()
+	r.resolved = true
+	ips, err := r.dns.LookupIP(r.domain)
+	if err != nil {
+		newError("failed to get IP address").Base(err).WriteToLog()
+	}
 	if len(ips) == 0 {
 		return nil
 	}
-	dests := make([]net.Address, len(ips))
-	for idx, ip := range ips {
-		dests[idx] = net.IPAddress(ip)
+	r.ip = make([]net.Address, len(ips))
+	for i, ip := range ips {
+		r.ip[i] = net.IPAddress(ip)
 	}
-	return dests
+	return r.ip
 }
 
-func (v *Router) TakeDetour(ctx context.Context) (string, error) {
-	for _, rule := range v.rules {
+// PickRoute implements core.Router.
+func (r *Router) PickRoute(ctx context.Context) (string, error) {
+	resolver := &ipResolver{
+		dns: r.dns,
+	}
+	if r.domainStrategy == Config_IpOnDemand {
+		if dest, ok := proxy.TargetFromContext(ctx); ok && dest.Address.Family().IsDomain() {
+			resolver.domain = dest.Address.Domain()
+			ctx = proxy.ContextWithResolveIPs(ctx, resolver)
+		}
+	}
+
+	for _, rule := range r.rules {
 		if rule.Apply(ctx) {
 			return rule.Tag, nil
 		}
@@ -72,15 +90,15 @@ func (v *Router) TakeDetour(ctx context.Context) (string, error) {
 
 	dest, ok := proxy.TargetFromContext(ctx)
 	if !ok {
-		return "", ErrNoRuleApplicable
+		return "", core.ErrNoClue
 	}
 
-	if v.domainStrategy == Config_IpIfNonMatch && dest.Address.Family().IsDomain() {
-		log.Info("Router: Looking up IP for ", dest)
-		ipDests := v.resolveIP(dest)
-		if ipDests != nil {
-			ctx = proxy.ContextWithResolveIPs(ctx, ipDests)
-			for _, rule := range v.rules {
+	if r.domainStrategy == Config_IpIfNonMatch && dest.Address.Family().IsDomain() {
+		resolver.domain = dest.Address.Domain()
+		ips := resolver.Resolve()
+		if len(ips) > 0 {
+			ctx = proxy.ContextWithResolveIPs(ctx, resolver)
+			for _, rule := range r.rules {
 				if rule.Apply(ctx) {
 					return rule.Tag, nil
 				}
@@ -88,25 +106,17 @@ func (v *Router) TakeDetour(ctx context.Context) (string, error) {
 		}
 	}
 
-	return "", ErrNoRuleApplicable
+	return "", core.ErrNoClue
 }
 
-func (Router) Interface() interface{} {
-	return (*Router)(nil)
-}
-
-func (Router) Start() error {
+// Start implements common.Runnable.
+func (*Router) Start() error {
 	return nil
 }
 
-func (Router) Close() {}
-
-func FromSpace(space app.Space) *Router {
-	app := space.GetApplication((*Router)(nil))
-	if app == nil {
-		return nil
-	}
-	return app.(*Router)
+// Close implements common.Closable.
+func (*Router) Close() error {
+	return nil
 }
 
 func init() {

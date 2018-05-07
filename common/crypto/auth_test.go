@@ -7,136 +7,122 @@ import (
 	"io"
 	"testing"
 
-	"time"
-
 	"v2ray.com/core/common/buf"
 	. "v2ray.com/core/common/crypto"
-	"v2ray.com/core/testing/assert"
+	"v2ray.com/core/common/protocol"
+	. "v2ray.com/ext/assert"
 )
 
 func TestAuthenticationReaderWriter(t *testing.T) {
-	assert := assert.On(t)
+	assert := With(t)
 
 	key := make([]byte, 16)
 	rand.Read(key)
 	block, err := aes.NewCipher(key)
-	assert.Error(err).IsNil()
+	assert(err, IsNil)
 
 	aead, err := cipher.NewGCM(block)
-	assert.Error(err).IsNil()
+	assert(err, IsNil)
 
-	payload := make([]byte, 8*1024)
-	rand.Read(payload)
+	const payloadSize = 1024 * 80
+	rawPayload := make([]byte, payloadSize)
+	rand.Read(rawPayload)
 
-	cache := buf.NewLocal(16 * 1024)
+	payload := buf.NewSize(payloadSize)
+	payload.Write(rawPayload)
+	assert(payload.Len(), Equals, int32(payloadSize))
+
+	cache := buf.NewSize(160 * 1024)
 	iv := make([]byte, 12)
 	rand.Read(iv)
 
 	writer := NewAuthenticationWriter(&AEADAuthenticator{
-		AEAD: aead,
-		NonceGenerator: &StaticBytesGenerator{
-			Content: iv,
-		},
-		AdditionalDataGenerator: &NoOpBytesGenerator{},
-	}, cache)
+		AEAD:                    aead,
+		NonceGenerator:          GenerateStaticBytes(iv),
+		AdditionalDataGenerator: GenerateEmptyBytes(),
+	}, PlainChunkSizeParser{}, cache, protocol.TransferTypeStream)
 
-	nBytes, err := writer.Write(payload)
-	assert.Error(err).IsNil()
-	assert.Int(nBytes).Equals(len(payload))
-	assert.Int(cache.Len()).GreaterThan(0)
-	_, err = writer.Write([]byte{})
-	assert.Error(err).IsNil()
+	assert(writer.WriteMultiBuffer(buf.NewMultiBufferValue(payload)), IsNil)
+	assert(cache.Len(), Equals, int32(82658))
+	assert(writer.WriteMultiBuffer(buf.MultiBuffer{}), IsNil)
 
 	reader := NewAuthenticationReader(&AEADAuthenticator{
-		AEAD: aead,
-		NonceGenerator: &StaticBytesGenerator{
-			Content: iv,
-		},
-		AdditionalDataGenerator: &NoOpBytesGenerator{},
-	}, cache)
+		AEAD:                    aead,
+		NonceGenerator:          GenerateStaticBytes(iv),
+		AdditionalDataGenerator: GenerateEmptyBytes(),
+	}, PlainChunkSizeParser{}, cache, protocol.TransferTypeStream)
 
-	actualPayload := make([]byte, 16*1024)
-	nBytes, err = reader.Read(actualPayload)
-	assert.Error(err).IsNil()
-	assert.Int(nBytes).Equals(len(payload))
-	assert.Bytes(actualPayload[:nBytes]).Equals(payload)
+	var mb buf.MultiBuffer
 
-	_, err = reader.Read(actualPayload)
-	assert.Error(err).Equals(io.EOF)
+	for mb.Len() < payloadSize {
+		mb2, err := reader.ReadMultiBuffer()
+		assert(err, IsNil)
+
+		mb.AppendMulti(mb2)
+	}
+
+	assert(mb.Len(), Equals, int32(payloadSize))
+
+	mbContent := make([]byte, payloadSize)
+	mb.Read(mbContent)
+	assert(mbContent, Equals, rawPayload)
+
+	_, err = reader.ReadMultiBuffer()
+	assert(err, Equals, io.EOF)
 }
 
-func TestAuthenticationReaderWriterPartial(t *testing.T) {
-	assert := assert.On(t)
+func TestAuthenticationReaderWriterPacket(t *testing.T) {
+	assert := With(t)
 
 	key := make([]byte, 16)
 	rand.Read(key)
 	block, err := aes.NewCipher(key)
-	assert.Error(err).IsNil()
+	assert(err, IsNil)
 
 	aead, err := cipher.NewGCM(block)
-	assert.Error(err).IsNil()
+	assert(err, IsNil)
 
-	payload := make([]byte, 8*1024)
-	rand.Read(payload)
-
+	cache := buf.NewSize(1024)
 	iv := make([]byte, 12)
 	rand.Read(iv)
 
-	cache := buf.NewLocal(16 * 1024)
 	writer := NewAuthenticationWriter(&AEADAuthenticator{
-		AEAD: aead,
-		NonceGenerator: &StaticBytesGenerator{
-			Content: iv,
-		},
-		AdditionalDataGenerator: &NoOpBytesGenerator{},
-	}, cache)
+		AEAD:                    aead,
+		NonceGenerator:          GenerateStaticBytes(iv),
+		AdditionalDataGenerator: GenerateEmptyBytes(),
+	}, PlainChunkSizeParser{}, cache, protocol.TransferTypePacket)
 
-	writer.Write([]byte{'a', 'b', 'c', 'd'})
+	var payload buf.MultiBuffer
+	pb1 := buf.New()
+	pb1.Write([]byte("abcd"))
+	payload.Append(pb1)
 
-	nBytes, err := writer.Write(payload)
-	assert.Error(err).IsNil()
-	assert.Int(nBytes).Equals(len(payload))
-	assert.Int(cache.Len()).GreaterThan(0)
-	_, err = writer.Write([]byte{})
-	assert.Error(err).IsNil()
+	pb2 := buf.New()
+	pb2.Write([]byte("efgh"))
+	payload.Append(pb2)
 
-	pr, pw := io.Pipe()
-	go func() {
-		pw.Write(cache.BytesTo(1024))
-		time.Sleep(time.Second * 2)
-		pw.Write(cache.BytesRange(1024, 2048))
-		time.Sleep(time.Second * 2)
-		pw.Write(cache.BytesRange(2048, 3072))
-		time.Sleep(time.Second * 2)
-		pw.Write(cache.BytesFrom(3072))
-		time.Sleep(time.Second * 2)
-		pw.Close()
-	}()
+	assert(writer.WriteMultiBuffer(payload), IsNil)
+	assert(cache.Len(), GreaterThan, int32(0))
+	assert(writer.WriteMultiBuffer(buf.MultiBuffer{}), IsNil)
+	assert(err, IsNil)
 
 	reader := NewAuthenticationReader(&AEADAuthenticator{
-		AEAD: aead,
-		NonceGenerator: &StaticBytesGenerator{
-			Content: iv,
-		},
-		AdditionalDataGenerator: &NoOpBytesGenerator{},
-	}, pr)
+		AEAD:                    aead,
+		NonceGenerator:          GenerateStaticBytes(iv),
+		AdditionalDataGenerator: GenerateEmptyBytes(),
+	}, PlainChunkSizeParser{}, cache, protocol.TransferTypePacket)
 
-	actualPayload := make([]byte, 7*1024)
-	nBytes, err = reader.Read(actualPayload)
-	assert.Error(err).IsNil()
-	assert.Int(nBytes).Equals(4)
-	assert.Bytes(actualPayload[:nBytes]).Equals([]byte{'a', 'b', 'c', 'd'})
+	mb, err := reader.ReadMultiBuffer()
+	assert(err, IsNil)
 
-	nBytes, err = reader.Read(actualPayload)
-	assert.Error(err).IsNil()
-	assert.Int(nBytes).Equals(len(actualPayload))
-	assert.Bytes(actualPayload[:nBytes]).Equals(payload[:nBytes])
+	b1 := mb.SplitFirst()
+	assert(b1.String(), Equals, "abcd")
 
-	nBytes, err = reader.Read(actualPayload)
-	assert.Error(err).IsNil()
-	assert.Int(nBytes).Equals(len(payload) - len(actualPayload))
-	assert.Bytes(actualPayload[:nBytes]).Equals(payload[7*1024:])
+	b2 := mb.SplitFirst()
+	assert(b2.String(), Equals, "efgh")
 
-	_, err = reader.Read(actualPayload)
-	assert.Error(err).Equals(io.EOF)
+	assert(mb.IsEmpty(), IsTrue)
+
+	_, err = reader.ReadMultiBuffer()
+	assert(err, Equals, io.EOF)
 }

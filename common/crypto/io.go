@@ -3,6 +3,9 @@ package crypto
 import (
 	"crypto/cipher"
 	"io"
+
+	"v2ray.com/core/common"
+	"v2ray.com/core/common/buf"
 )
 
 type CryptionReader struct {
@@ -17,13 +20,17 @@ func NewCryptionReader(stream cipher.Stream, reader io.Reader) *CryptionReader {
 	}
 }
 
-func (v *CryptionReader) Read(data []byte) (int, error) {
-	nBytes, err := v.reader.Read(data)
+func (r *CryptionReader) Read(data []byte) (int, error) {
+	nBytes, err := r.reader.Read(data)
 	if nBytes > 0 {
-		v.stream.XORKeyStream(data[:nBytes], data[:nBytes])
+		r.stream.XORKeyStream(data[:nBytes], data[:nBytes])
 	}
 	return nBytes, err
 }
+
+var (
+	_ buf.Writer = (*CryptionWriter)(nil)
+)
 
 type CryptionWriter struct {
 	stream cipher.Stream
@@ -39,7 +46,18 @@ func NewCryptionWriter(stream cipher.Stream, writer io.Writer) *CryptionWriter {
 }
 
 // Write implements io.Writer.Write().
-func (v *CryptionWriter) Write(data []byte) (int, error) {
-	v.stream.XORKeyStream(data, data)
-	return v.writer.Write(data)
+func (w *CryptionWriter) Write(data []byte) (int, error) {
+	w.stream.XORKeyStream(data, data)
+	return w.writer.Write(data)
+}
+
+// WriteMultiBuffer implements buf.Writer.
+func (w *CryptionWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	defer mb.Release()
+
+	bs := mb.ToNetBuffers()
+	for _, b := range bs {
+		w.stream.XORKeyStream(b, b)
+	}
+	return common.Error2(bs.WriteTo(w.writer))
 }

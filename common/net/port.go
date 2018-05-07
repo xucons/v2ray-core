@@ -3,7 +3,6 @@ package net
 import (
 	"strconv"
 
-	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/serial"
 )
 
@@ -20,7 +19,7 @@ func PortFromBytes(port []byte) Port {
 // @error when the integer is not positive or larger then 65535
 func PortFromInt(val uint32) (Port, error) {
 	if val > 65535 {
-		return Port(0), errors.New("Net: Invalid port range: ", val)
+		return Port(0), newError("invalid port range: ", val)
 	}
 	return Port(val), nil
 }
@@ -30,42 +29,45 @@ func PortFromInt(val uint32) (Port, error) {
 func PortFromString(s string) (Port, error) {
 	val, err := strconv.ParseUint(s, 10, 32)
 	if err != nil {
-		return Port(0), errors.New("Net: Invalid port range: ", s)
+		return Port(0), newError("invalid port range: ", s)
 	}
 	return PortFromInt(uint32(val))
 }
 
-// Value return the correspoding uint16 value of v Port.
-func (v Port) Value() uint16 {
-	return uint16(v)
+// Value return the correspoding uint16 value of a Port.
+func (p Port) Value() uint16 {
+	return uint16(p)
 }
 
-// Bytes returns the correspoding bytes of v Port, in big endian order.
-func (v Port) Bytes(b []byte) []byte {
-	return serial.Uint16ToBytes(v.Value(), b)
+// Bytes returns the correspoding bytes of a Port, in big endian order.
+func (p Port) Bytes(b []byte) []byte {
+	return serial.Uint16ToBytes(p.Value(), b)
 }
 
-// String returns the string presentation of v Port.
-func (v Port) String() string {
-	return serial.Uint16ToString(v.Value())
+// String returns the string presentation of a Port.
+func (p Port) String() string {
+	return serial.Uint16ToString(p.Value())
 }
 
-func (v PortRange) FromPort() Port {
-	return Port(v.From)
+// FromPort returns the beginning port of this PortRange.
+func (p PortRange) FromPort() Port {
+	return Port(p.From)
 }
 
-func (v PortRange) ToPort() Port {
-	return Port(v.To)
+// ToPort returns the end port of this PortRange.
+func (p PortRange) ToPort() Port {
+	return Port(p.To)
 }
 
-// Contains returns true if the given port is within the range of v PortRange.
-func (v PortRange) Contains(port Port) bool {
-	return v.FromPort() <= port && port <= v.ToPort()
+// Contains returns true if the given port is within the range of a PortRange.
+func (p PortRange) Contains(port Port) bool {
+	return p.FromPort() <= port && port <= p.ToPort()
 }
 
-func SinglePortRange(v Port) *PortRange {
+// SinglePortRange returns a PortRange contains a single port.
+func SinglePortRange(p Port) *PortRange {
 	return &PortRange{
-		From: uint32(v),
-		To:   uint32(v),
+		From: uint32(p),
+		To:   uint32(p),
 	}
 }

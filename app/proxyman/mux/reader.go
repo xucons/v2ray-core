@@ -1,59 +1,94 @@
 package mux
 
-import "io"
-import "v2ray.com/core/common/buf"
-import "v2ray.com/core/common/serial"
+import (
+	"io"
 
-type muxReader struct {
-	reader          io.Reader
-	remainingLength int
-	buffer          *buf.Buffer
-}
+	"v2ray.com/core/common/buf"
+	"v2ray.com/core/common/serial"
+)
 
-func NewReader(reader buf.Reader) *muxReader {
-	return &muxReader{
-		reader: buf.NewBytesReader(reader),
-		buffer: buf.NewLocal(1024),
-	}
-}
-
-func (r *muxReader) ReadMetadata() (*FrameMetadata, error) {
-	b := r.buffer
-	b.Clear()
-
-	if err := b.AppendSupplier(buf.ReadFullFrom(r.reader, 2)); err != nil {
+// ReadMetadata reads FrameMetadata from the given reader.
+func ReadMetadata(reader io.Reader) (*FrameMetadata, error) {
+	metaLen, err := serial.ReadUint16(reader)
+	if err != nil {
 		return nil, err
 	}
-	metaLen := serial.BytesToUint16(b.Bytes())
-	b.Clear()
-	if err := b.AppendSupplier(buf.ReadFullFrom(r.reader, int(metaLen))); err != nil {
+	if metaLen > 512 {
+		return nil, newError("invalid metalen ", metaLen).AtError()
+	}
+
+	b := buf.NewSize(int32(metaLen))
+	defer b.Release()
+
+	if err := b.Reset(buf.ReadFullFrom(reader, int32(metaLen))); err != nil {
 		return nil, err
 	}
-	return ReadFrameFrom(b.Bytes())
+	return ReadFrameFrom(b)
 }
 
-func (r *muxReader) Read() (*buf.Buffer, bool, error) {
-	b := buf.New()
-	var dataLen int
-	if r.remainingLength > 0 {
-		dataLen = r.remainingLength
-		r.remainingLength = 0
-	} else {
-		if err := b.AppendSupplier(buf.ReadFullFrom(r.reader, 2)); err != nil {
-			return nil, false, err
+// PacketReader is an io.Reader that reads whole chunk of Mux frames every time.
+type PacketReader struct {
+	reader io.Reader
+	eof    bool
+}
+
+// NewPacketReader creates a new PacketReader.
+func NewPacketReader(reader io.Reader) *PacketReader {
+	return &PacketReader{
+		reader: reader,
+		eof:    false,
+	}
+}
+
+// ReadMultiBuffer implements buf.Reader.
+func (r *PacketReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
+	if r.eof {
+		return nil, io.EOF
+	}
+
+	size, err := serial.ReadUint16(r.reader)
+	if err != nil {
+		return nil, err
+	}
+
+	b := buf.NewSize(int32(size))
+	if err := b.Reset(buf.ReadFullFrom(r.reader, int32(size))); err != nil {
+		b.Release()
+		return nil, err
+	}
+	r.eof = true
+	return buf.NewMultiBufferValue(b), nil
+}
+
+// StreamReader reads Mux frame as a stream.
+type StreamReader struct {
+	reader   *buf.BufferedReader
+	leftOver int32
+}
+
+// NewStreamReader creates a new StreamReader.
+func NewStreamReader(reader *buf.BufferedReader) *StreamReader {
+	return &StreamReader{
+		reader:   reader,
+		leftOver: -1,
+	}
+}
+
+// ReadMultiBuffer implmenets buf.Reader.
+func (r *StreamReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
+	if r.leftOver == 0 {
+		return nil, io.EOF
+	}
+
+	if r.leftOver == -1 {
+		size, err := serial.ReadUint16(r.reader)
+		if err != nil {
+			return nil, err
 		}
-		dataLen = int(serial.BytesToUint16(b.Bytes()))
-		b.Clear()
+		r.leftOver = int32(size)
 	}
 
-	if dataLen > buf.Size {
-		r.remainingLength = dataLen - buf.Size
-		dataLen = buf.Size
-	}
-
-	if err := b.AppendSupplier(buf.ReadFullFrom(r.reader, dataLen)); err != nil {
-		return nil, false, err
-	}
-
-	return b, (r.remainingLength > 0), nil
+	mb, err := r.reader.ReadAtMost(r.leftOver)
+	r.leftOver -= mb.Len()
+	return mb, err
 }

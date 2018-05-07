@@ -2,10 +2,8 @@ package router
 
 import (
 	"context"
-	"net"
 
-	"v2ray.com/core/common/errors"
-	v2net "v2ray.com/core/common/net"
+	"v2ray.com/core/common/net"
 )
 
 type Rule struct {
@@ -13,113 +11,88 @@ type Rule struct {
 	Condition Condition
 }
 
-func (v *Rule) Apply(ctx context.Context) bool {
-	return v.Condition.Apply(ctx)
+func (r *Rule) Apply(ctx context.Context) bool {
+	return r.Condition.Apply(ctx)
 }
 
-func (v *RoutingRule) BuildCondition() (Condition, error) {
+func cidrToCondition(cidr []*CIDR, source bool) (Condition, error) {
+	ipv4Net := net.NewIPNetTable()
+	ipv6Cond := NewAnyCondition()
+	hasIpv6 := false
+
+	for _, ip := range cidr {
+		switch len(ip.Ip) {
+		case net.IPv4len:
+			ipv4Net.AddIP(ip.Ip, byte(ip.Prefix))
+		case net.IPv6len:
+			hasIpv6 = true
+			matcher, err := NewCIDRMatcher(ip.Ip, ip.Prefix, source)
+			if err != nil {
+				return nil, err
+			}
+			ipv6Cond.Add(matcher)
+		default:
+			return nil, newError("invalid IP length").AtWarning()
+		}
+	}
+
+	if !ipv4Net.IsEmpty() && hasIpv6 {
+		cond := NewAnyCondition()
+		cond.Add(NewIPv4Matcher(ipv4Net, source))
+		cond.Add(ipv6Cond)
+		return cond, nil
+	} else if !ipv4Net.IsEmpty() {
+		return NewIPv4Matcher(ipv4Net, source), nil
+	} else {
+		return ipv6Cond, nil
+	}
+}
+
+func (rr *RoutingRule) BuildCondition() (Condition, error) {
 	conds := NewConditionChan()
 
-	if len(v.Domain) > 0 {
-		anyCond := NewAnyCondition()
-		for _, domain := range v.Domain {
-			if domain.Type == Domain_Plain {
-				anyCond.Add(NewPlainDomainMatcher(domain.Value))
-			} else {
-				matcher, err := NewRegexpDomainMatcher(domain.Value)
-				if err != nil {
-					return nil, err
-				}
-				anyCond.Add(matcher)
-			}
+	if len(rr.Domain) > 0 {
+		matcher := NewCachableDomainMatcher()
+		for _, domain := range rr.Domain {
+			matcher.Add(domain)
 		}
-		conds.Add(anyCond)
+		conds.Add(matcher)
 	}
 
-	if len(v.Cidr) > 0 {
-		ipv4Net := v2net.NewIPNet()
-		ipv6Cond := NewAnyCondition()
-		hasIpv6 := false
+	if len(rr.UserEmail) > 0 {
+		conds.Add(NewUserMatcher(rr.UserEmail))
+	}
 
-		for _, ip := range v.Cidr {
-			switch len(ip.Ip) {
-			case net.IPv4len:
-				ipv4Net.AddIP(ip.Ip, byte(ip.Prefix))
-			case net.IPv6len:
-				hasIpv6 = true
-				matcher, err := NewCIDRMatcher(ip.Ip, ip.Prefix, false)
-				if err != nil {
-					return nil, err
-				}
-				ipv6Cond.Add(matcher)
-			default:
-				return nil, errors.New("Router: Invalid IP length.")
-			}
+	if len(rr.InboundTag) > 0 {
+		conds.Add(NewInboundTagMatcher(rr.InboundTag))
+	}
+
+	if rr.PortRange != nil {
+		conds.Add(NewPortMatcher(*rr.PortRange))
+	}
+
+	if rr.NetworkList != nil {
+		conds.Add(NewNetworkMatcher(rr.NetworkList))
+	}
+
+	if len(rr.Cidr) > 0 {
+		cond, err := cidrToCondition(rr.Cidr, false)
+		if err != nil {
+			return nil, err
 		}
+		conds.Add(cond)
+	}
 
-		if !ipv4Net.IsEmpty() && hasIpv6 {
-			cond := NewAnyCondition()
-			cond.Add(NewIPv4Matcher(ipv4Net, false))
-			cond.Add(ipv6Cond)
-			conds.Add(cond)
-		} else if !ipv4Net.IsEmpty() {
-			conds.Add(NewIPv4Matcher(ipv4Net, false))
-		} else if hasIpv6 {
-			conds.Add(ipv6Cond)
+	if len(rr.SourceCidr) > 0 {
+		cond, err := cidrToCondition(rr.SourceCidr, true)
+		if err != nil {
+			return nil, err
 		}
-	}
-
-	if v.PortRange != nil {
-		conds.Add(NewPortMatcher(*v.PortRange))
-	}
-
-	if v.NetworkList != nil {
-		conds.Add(NewNetworkMatcher(v.NetworkList))
-	}
-
-	if len(v.SourceCidr) > 0 {
-		ipv4Net := v2net.NewIPNet()
-		ipv6Cond := NewAnyCondition()
-		hasIpv6 := false
-
-		for _, ip := range v.SourceCidr {
-			switch len(ip.Ip) {
-			case net.IPv4len:
-				ipv4Net.AddIP(ip.Ip, byte(ip.Prefix))
-			case net.IPv6len:
-				hasIpv6 = true
-				matcher, err := NewCIDRMatcher(ip.Ip, ip.Prefix, true)
-				if err != nil {
-					return nil, err
-				}
-				ipv6Cond.Add(matcher)
-			default:
-				return nil, errors.New("Router: Invalid IP length.")
-			}
-		}
-
-		if !ipv4Net.IsEmpty() && hasIpv6 {
-			cond := NewAnyCondition()
-			cond.Add(NewIPv4Matcher(ipv4Net, true))
-			cond.Add(ipv6Cond)
-			conds.Add(cond)
-		} else if !ipv4Net.IsEmpty() {
-			conds.Add(NewIPv4Matcher(ipv4Net, true))
-		} else if hasIpv6 {
-			conds.Add(ipv6Cond)
-		}
-	}
-
-	if len(v.UserEmail) > 0 {
-		conds.Add(NewUserMatcher(v.UserEmail))
-	}
-
-	if len(v.InboundTag) > 0 {
-		conds.Add(NewInboundTagMatcher(v.InboundTag))
+		conds.Add(cond)
 	}
 
 	if conds.Len() == 0 {
-		return nil, errors.New("Router: This rule has no effective fields.")
+		return nil, newError("this rule has no effective fields").AtWarning()
 	}
 
 	return conds, nil

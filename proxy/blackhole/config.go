@@ -1,6 +1,7 @@
 package blackhole
 
 import (
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/serial"
 )
@@ -18,26 +19,28 @@ Content-Length: 0
 // ResponseConfig is the configuration for blackhole responses.
 type ResponseConfig interface {
 	// WriteTo writes predefined response to the give buffer.
-	WriteTo(buf.Writer)
+	WriteTo(buf.Writer) int32
 }
 
 // WriteTo implements ResponseConfig.WriteTo().
-func (v *NoneResponse) WriteTo(buf.Writer) {}
+func (*NoneResponse) WriteTo(buf.Writer) int32 { return 0 }
 
 // WriteTo implements ResponseConfig.WriteTo().
-func (v *HTTPResponse) WriteTo(writer buf.Writer) {
-	b := buf.NewLocal(512)
-	b.AppendSupplier(serial.WriteString(http403response))
-	writer.Write(b)
+func (*HTTPResponse) WriteTo(writer buf.Writer) int32 {
+	b := buf.New()
+	common.Must(b.Reset(serial.WriteString(http403response)))
+	n := b.Len()
+	writer.WriteMultiBuffer(buf.NewMultiBufferValue(b))
+	return n
 }
 
 // GetInternalResponse converts response settings from proto to internal data structure.
-func (v *Config) GetInternalResponse() (ResponseConfig, error) {
-	if v.GetResponse() == nil {
+func (c *Config) GetInternalResponse() (ResponseConfig, error) {
+	if c.GetResponse() == nil {
 		return new(NoneResponse), nil
 	}
 
-	config, err := v.GetResponse().GetInstance()
+	config, err := c.GetResponse().GetInstance()
 	if err != nil {
 		return nil, err
 	}

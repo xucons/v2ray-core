@@ -1,35 +1,31 @@
 package websocket
 
 import (
+	"context"
 	"crypto/tls"
-	"net"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
-	"v2ray.com/core/app/log"
+	"websocket"
+
 	"v2ray.com/core/common"
-	"v2ray.com/core/common/errors"
-	v2net "v2ray.com/core/common/net"
+	"v2ray.com/core/common/net"
+	http_proto "v2ray.com/core/common/protocol/http"
 	"v2ray.com/core/transport/internet"
-	"v2ray.com/core/transport/internet/internal"
 	v2tls "v2ray.com/core/transport/internet/tls"
 )
 
-var (
-	ErrClosedListener = errors.New("Listener is closed.")
-)
-
-type ConnectionWithError struct {
-	conn net.Conn
-	err  error
+type requestHandler struct {
+	path string
+	ln   *Listener
 }
 
-type requestHandler struct {
-	path  string
-	conns chan *ConnectionWithError
+var upgrader = &websocket.Upgrader{
+	ReadBufferSize:   4 * 1024,
+	WriteBufferSize:  4 * 1024,
+	HandshakeTimeout: time.Second * 8,
 }
 
 func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -37,146 +33,85 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		writer.WriteHeader(http.StatusNotFound)
 		return
 	}
-	conn, err := converttovws(writer, request)
+	conn, err := upgrader.Upgrade(writer, request, nil)
 	if err != nil {
-		log.Info("WebSocket|Listener: Failed to convert to WebSocket connection: ", err)
+		newError("failed to convert to WebSocket connection").Base(err).WriteToLog()
 		return
 	}
 
-	select {
-	case h.conns <- &ConnectionWithError{conn: conn}:
-	default:
-		conn.Close()
+	forwardedAddrs := http_proto.ParseXForwardedFor(request.Header)
+	remoteAddr := conn.RemoteAddr()
+	if len(forwardedAddrs) > 0 && forwardedAddrs[0].Family().Either(net.AddressFamilyIPv4, net.AddressFamilyIPv6) {
+		remoteAddr.(*net.TCPAddr).IP = forwardedAddrs[0].IP()
 	}
+
+	h.ln.addConn(newConnection(conn, remoteAddr))
 }
 
 type Listener struct {
 	sync.Mutex
-	acccepting    bool
-	awaitingConns chan *ConnectionWithError
-	listener      net.Listener
-	tlsConfig     *tls.Config
-	config        *Config
+	listener  net.Listener
+	tlsConfig *tls.Config
+	config    *Config
+	addConn   internet.ConnHandler
 }
 
-func ListenWS(address v2net.Address, port v2net.Port, options internet.ListenOptions) (internet.Listener, error) {
-	networkSettings, err := options.Stream.GetEffectiveTransportSettings()
-	if err != nil {
-		return nil, err
-	}
+func ListenWS(ctx context.Context, address net.Address, port net.Port, addConn internet.ConnHandler) (internet.Listener, error) {
+	networkSettings := internet.TransportSettingsFromContext(ctx)
 	wsSettings := networkSettings.(*Config)
 
 	l := &Listener{
-		acccepting:    true,
-		awaitingConns: make(chan *ConnectionWithError, 32),
-		config:        wsSettings,
+		config:  wsSettings,
+		addConn: addConn,
 	}
-	if options.Stream != nil && options.Stream.HasSecuritySettings() {
-		securitySettings, err := options.Stream.GetEffectiveSecuritySettings()
-		if err != nil {
-			return nil, errors.Base(err).Message("WebSocket: Failed to create apply TLS config.")
-		}
-		tlsConfig, ok := securitySettings.(*v2tls.Config)
-		if ok {
-			l.tlsConfig = tlsConfig.GetTLSConfig()
-		}
+	if config := v2tls.ConfigFromContext(ctx); config != nil {
+		l.tlsConfig = config.GetTLSConfig()
 	}
 
-	err = l.listenws(address, port)
+	err := l.listenws(address, port)
 
 	return l, err
 }
 
-func (ln *Listener) listenws(address v2net.Address, port v2net.Port) error {
+func (ln *Listener) listenws(address net.Address, port net.Port) error {
 	netAddr := address.String() + ":" + strconv.Itoa(int(port.Value()))
 	var listener net.Listener
 	if ln.tlsConfig == nil {
 		l, err := net.Listen("tcp", netAddr)
 		if err != nil {
-			return errors.Base(err).Message("WebSocket|Listener: Failed to listen TCP ", netAddr)
+			return newError("failed to listen TCP ", netAddr).Base(err)
 		}
 		listener = l
 	} else {
 		l, err := tls.Listen("tcp", netAddr, ln.tlsConfig)
 		if err != nil {
-			return errors.Base(err).Message("WebSocket|Listener: Failed to listen TLS ", netAddr)
+			return newError("failed to listen TLS ", netAddr).Base(err)
 		}
 		listener = l
 	}
 	ln.listener = listener
 
 	go func() {
-		http.Serve(listener, &requestHandler{
-			path:  ln.config.GetNormailzedPath(),
-			conns: ln.awaitingConns,
+		err := http.Serve(listener, &requestHandler{
+			path: ln.config.GetNormalizedPath(),
+			ln:   ln,
 		})
+		if err != nil {
+			newError("failed to serve http for WebSocket").Base(err).AtWarning().WriteToLog()
+		}
 	}()
 
 	return nil
 }
 
-func converttovws(w http.ResponseWriter, r *http.Request) (*wsconn, error) {
-	var upgrader = websocket.Upgrader{
-		ReadBufferSize:  32 * 1024,
-		WriteBufferSize: 32 * 1024,
-	}
-	conn, err := upgrader.Upgrade(w, r, nil)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return &wsconn{wsc: conn}, nil
-}
-
-func (ln *Listener) Accept() (internet.Connection, error) {
-	for ln.acccepting {
-		select {
-		case connErr, open := <-ln.awaitingConns:
-			if !open {
-				return nil, ErrClosedListener
-			}
-			if connErr.err != nil {
-				return nil, connErr.err
-			}
-			return internal.NewConnection(internal.ConnectionID{}, connErr.conn, ln, internal.ReuseConnection(ln.config.IsConnectionReuse())), nil
-		case <-time.After(time.Second * 2):
-		}
-	}
-	return nil, ErrClosedListener
-}
-
-func (ln *Listener) Put(id internal.ConnectionID, conn net.Conn) {
-	ln.Lock()
-	defer ln.Unlock()
-	if !ln.acccepting {
-		return
-	}
-	select {
-	case ln.awaitingConns <- &ConnectionWithError{conn: conn}:
-	default:
-		conn.Close()
-	}
-}
-
+// Addr implements net.Listener.Addr().
 func (ln *Listener) Addr() net.Addr {
 	return ln.listener.Addr()
 }
 
+// Close implements net.Listener.Close().
 func (ln *Listener) Close() error {
-	ln.Lock()
-	defer ln.Unlock()
-	ln.acccepting = false
-
-	ln.listener.Close()
-
-	close(ln.awaitingConns)
-	for connErr := range ln.awaitingConns {
-		if connErr.conn != nil {
-			connErr.conn.Close()
-		}
-	}
-	return nil
+	return ln.listener.Close()
 }
 
 func init() {

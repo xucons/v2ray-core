@@ -2,9 +2,9 @@ package kcp
 
 import (
 	"crypto/cipher"
-	"errors"
 	"hash/fnv"
 
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/serial"
 )
 
@@ -17,23 +17,23 @@ func NewSimpleAuthenticator() cipher.AEAD {
 }
 
 // NonceSize implements cipher.AEAD.NonceSize().
-func (v *SimpleAuthenticator) NonceSize() int {
+func (*SimpleAuthenticator) NonceSize() int {
 	return 0
 }
 
 // Overhead implements cipher.AEAD.NonceSize().
-func (v *SimpleAuthenticator) Overhead() int {
+func (*SimpleAuthenticator) Overhead() int {
 	return 6
 }
 
 // Seal implements cipher.AEAD.Seal().
-func (v *SimpleAuthenticator) Seal(dst, nonce, plain, extra []byte) []byte {
+func (a *SimpleAuthenticator) Seal(dst, nonce, plain, extra []byte) []byte {
 	dst = append(dst, 0, 0, 0, 0)
 	dst = serial.Uint16ToBytes(uint16(len(plain)), dst)
 	dst = append(dst, plain...)
 
 	fnvHash := fnv.New32a()
-	fnvHash.Write(dst[4:])
+	common.Must2(fnvHash.Write(dst[4:]))
 	fnvHash.Sum(dst[:0])
 
 	len := len(dst)
@@ -49,7 +49,7 @@ func (v *SimpleAuthenticator) Seal(dst, nonce, plain, extra []byte) []byte {
 }
 
 // Open implements cipher.AEAD.Open().
-func (v *SimpleAuthenticator) Open(dst, nonce, cipherText, extra []byte) ([]byte, error) {
+func (a *SimpleAuthenticator) Open(dst, nonce, cipherText, extra []byte) ([]byte, error) {
 	dst = append(dst, cipherText...)
 	dstLen := len(dst)
 	xtra := 4 - dstLen%4
@@ -62,14 +62,14 @@ func (v *SimpleAuthenticator) Open(dst, nonce, cipherText, extra []byte) ([]byte
 	}
 
 	fnvHash := fnv.New32a()
-	fnvHash.Write(dst[4:])
+	common.Must2(fnvHash.Write(dst[4:]))
 	if serial.BytesToUint32(dst[:4]) != fnvHash.Sum32() {
-		return nil, errors.New("KCP:SimpleAuthenticator: Invalid auth.")
+		return nil, newError("invalid auth")
 	}
 
 	length := serial.BytesToUint16(dst[4:6])
 	if len(dst)-6 != int(length) {
-		return nil, errors.New("KCP:SimpleAuthenticator: Invalid auth.")
+		return nil, newError("invalid auth")
 	}
 
 	return dst[6:], nil

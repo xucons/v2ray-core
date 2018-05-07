@@ -2,16 +2,18 @@ package encoding
 
 import (
 	"crypto/md5"
-	"errors"
 	"hash/fnv"
 
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/serial"
+
+	"golang.org/x/crypto/sha3"
 )
 
 // Authenticate authenticates a byte array using Fnv hash.
 func Authenticate(b []byte) uint32 {
 	fnv1hash := fnv.New32a()
-	fnv1hash.Write(b)
+	common.Must2(fnv1hash.Write(b))
 	return fnv1hash.Sum32()
 }
 
@@ -40,25 +42,25 @@ type FnvAuthenticator struct {
 }
 
 // NonceSize implements AEAD.NonceSize().
-func (v *FnvAuthenticator) NonceSize() int {
+func (*FnvAuthenticator) NonceSize() int {
 	return 0
 }
 
 // Overhead impelements AEAD.Overhead().
-func (v *FnvAuthenticator) Overhead() int {
+func (*FnvAuthenticator) Overhead() int {
 	return 4
 }
 
 // Seal implements AEAD.Seal().
-func (v *FnvAuthenticator) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
+func (*FnvAuthenticator) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
 	dst = serial.Uint32ToBytes(Authenticate(plaintext), dst)
 	return append(dst, plaintext...)
 }
 
 // Open implements AEAD.Open().
-func (v *FnvAuthenticator) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error) {
+func (*FnvAuthenticator) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error) {
 	if serial.BytesToUint32(ciphertext[:4]) != Authenticate(ciphertext[4:]) {
-		return dst, errors.New("VMess|FNV: Invalid authentication.")
+		return dst, newError("invalid authentication")
 	}
 	return append(dst, ciphertext[4:]...), nil
 }
@@ -71,4 +73,37 @@ func GenerateChacha20Poly1305Key(b []byte) []byte {
 	t = md5.Sum(key[:16])
 	copy(key[16:], t[:])
 	return key
+}
+
+type ShakeSizeParser struct {
+	shake  sha3.ShakeHash
+	buffer [2]byte
+}
+
+func NewShakeSizeParser(nonce []byte) *ShakeSizeParser {
+	shake := sha3.NewShake128()
+	common.Must2(shake.Write(nonce))
+	return &ShakeSizeParser{
+		shake: shake,
+	}
+}
+
+func (*ShakeSizeParser) SizeBytes() int32 {
+	return 2
+}
+
+func (s *ShakeSizeParser) next() uint16 {
+	common.Must2(s.shake.Read(s.buffer[:]))
+	return serial.BytesToUint16(s.buffer[:])
+}
+
+func (s *ShakeSizeParser) Decode(b []byte) (uint16, error) {
+	mask := s.next()
+	size := serial.BytesToUint16(b)
+	return mask ^ size, nil
+}
+
+func (s *ShakeSizeParser) Encode(size uint16, b []byte) []byte {
+	mask := s.next()
+	return serial.Uint16ToBytes(mask^size, b[:0])
 }

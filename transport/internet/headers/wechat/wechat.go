@@ -12,10 +12,11 @@ type VideoChat struct {
 	sn int
 }
 
-func (vc *VideoChat) Size() int {
+func (vc *VideoChat) Size() int32 {
 	return 13
 }
 
+// Write implements io.Writer.
 func (vc *VideoChat) Write(b []byte) (int, error) {
 	vc.sn++
 	b = append(b[:0], 0xa1, 0x08)
@@ -24,9 +25,10 @@ func (vc *VideoChat) Write(b []byte) (int, error) {
 	return 13, nil
 }
 
+// NewVideoChat returns a new VideoChat instance based on given config.
 func NewVideoChat(ctx context.Context, config interface{}) (interface{}, error) {
 	return &VideoChat{
-		sn: dice.Roll(65535),
+		sn: int(dice.RollUint16()),
 	}, nil
 }
 

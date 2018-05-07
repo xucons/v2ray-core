@@ -2,21 +2,27 @@ package buf
 
 import (
 	"io"
-
-	"v2ray.com/core/common/errors"
-	"v2ray.com/core/common/signal"
+	"time"
 )
 
-// Reader extends io.Reader with alloc.Buffer.
+// Reader extends io.Reader with MultiBuffer.
 type Reader interface {
-	// Read reads content from underlying reader, and put it into an alloc.Buffer.
-	Read() (*Buffer, error)
+	// ReadMultiBuffer reads content from underlying reader, and put it into a MultiBuffer.
+	ReadMultiBuffer() (MultiBuffer, error)
 }
 
-// Writer extends io.Writer with alloc.Buffer.
+// ErrReadTimeout is an error that happens with IO timeout.
+var ErrReadTimeout = newError("IO timeout")
+
+// TimeoutReader is a reader that returns error if Read() operation takes longer than the given timeout.
+type TimeoutReader interface {
+	ReadTimeout(time.Duration) (MultiBuffer, error)
+}
+
+// Writer extends io.Writer with MultiBuffer.
 type Writer interface {
-	// Write writes an alloc.Buffer into underlying writer.
-	Write(*Buffer) error
+	// WriteMultiBuffer writes a MultiBuffer into underlying writer.
+	WriteMultiBuffer(MultiBuffer) error
 }
 
 // ReadFrom creates a Supplier to read from a given io.Reader.
@@ -27,67 +33,43 @@ func ReadFrom(reader io.Reader) Supplier {
 }
 
 // ReadFullFrom creates a Supplier to read full buffer from a given io.Reader.
-func ReadFullFrom(reader io.Reader, size int) Supplier {
+func ReadFullFrom(reader io.Reader, size int32) Supplier {
 	return func(b []byte) (int, error) {
 		return io.ReadFull(reader, b[:size])
 	}
 }
 
-// Pipe dumps all content from reader to writer, until an error happens.
-func Pipe(timer *signal.ActivityTimer, reader Reader, writer Writer) error {
-	for {
-		buffer, err := reader.Read()
-		if err != nil {
-			return err
-		}
-
-		timer.UpdateActivity()
-
-		if buffer.IsEmpty() {
-			buffer.Release()
-			continue
-		}
-
-		err = writer.Write(buffer)
-		if err != nil {
-			buffer.Release()
-			return err
-		}
+// ReadAtLeastFrom create a Supplier to read at least size bytes from the given io.Reader.
+func ReadAtLeastFrom(reader io.Reader, size int) Supplier {
+	return func(b []byte) (int, error) {
+		return io.ReadAtLeast(reader, b, size)
 	}
-}
-
-// PipeUntilEOF behaves the same as Pipe(). The only difference is PipeUntilEOF returns nil on EOF.
-func PipeUntilEOF(timer *signal.ActivityTimer, reader Reader, writer Writer) error {
-	err := Pipe(timer, reader, writer)
-	if err != nil && errors.Cause(err) != io.EOF {
-		return err
-	}
-	return nil
 }
 
 // NewReader creates a new Reader.
 // The Reader instance doesn't take the ownership of reader.
 func NewReader(reader io.Reader) Reader {
-	return &BytesToBufferReader{
-		reader: reader,
+	if mr, ok := reader.(Reader); ok {
+		return mr
 	}
-}
 
-func NewBytesReader(stream Reader) *BufferToBytesReader {
-	return &BufferToBytesReader{
-		stream: stream,
-	}
+	return NewBytesToBufferReader(reader)
 }
 
 // NewWriter creates a new Writer.
 func NewWriter(writer io.Writer) Writer {
+	if mw, ok := writer.(Writer); ok {
+		return mw
+	}
+
 	return &BufferToBytesWriter{
-		writer: writer,
+		Writer: writer,
 	}
 }
 
-func NewBytesWriter(writer Writer) *BytesToBufferWriter {
-	return &BytesToBufferWriter{
+// NewSequentialWriter returns a Writer that write Buffers in a MultiBuffer sequentially.
+func NewSequentialWriter(writer io.Writer) Writer {
+	return &seqWriter{
 		writer: writer,
 	}
 }

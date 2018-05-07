@@ -6,14 +6,13 @@ option go_package = "proxyman";
 option java_package = "com.v2ray.core.app.proxyman";
 option java_multiple_files = true;
 
-message InboundConfig {
-}
-
-import "v2ray.com/core/common/serial/typed_message.proto";
 import "v2ray.com/core/common/net/address.proto";
-import "v2ray.com/core/common/net/destination.proto";
 import "v2ray.com/core/common/net/port.proto";
 import "v2ray.com/core/transport/internet/config.proto";
+import "v2ray.com/core/common/serial/typed_message.proto";
+
+message InboundConfig {
+}
 
 message AllocationStrategy {
   enum Type {
@@ -47,24 +46,31 @@ message AllocationStrategy {
   AllocationStrategyRefresh refresh = 3;
 }
 
+enum KnownProtocols {
+  HTTP = 0;
+  TLS = 1;
+}
+
 message ReceiverConfig {
+  // PortRange specifies the ports which the Receiver should listen on.
   v2ray.core.common.net.PortRange port_range = 1;
+  // Listen specifies the IP address that the Receiver should listen on.
   v2ray.core.common.net.IPOrDomain listen = 2;
   AllocationStrategy allocation_strategy = 3;
   v2ray.core.transport.internet.StreamConfig stream_settings = 4;
   bool receive_original_destination = 5;
-  bool allow_passive_connection = 6 [deprecated=true];
+  reserved 6;
+  repeated KnownProtocols domain_override = 7;
 }
 
 message InboundHandlerConfig {
   string tag = 1;
   v2ray.core.common.serial.TypedMessage receiver_settings = 2;
   v2ray.core.common.serial.TypedMessage proxy_settings = 3;
-  DispatchConfig dispatch_settings = 4;
 }
 
 message OutboundConfig {
-  
+
 }
 
 message SenderConfig {
@@ -72,36 +78,12 @@ message SenderConfig {
   v2ray.core.common.net.IPOrDomain via = 1;
   v2ray.core.transport.internet.StreamConfig stream_settings = 2;
   v2ray.core.transport.internet.ProxyConfig proxy_settings = 3;
-}
-
-message OutboundHandlerConfig {
-  string tag = 1;
-  v2ray.core.common.serial.TypedMessage sender_settings = 2;
-  v2ray.core.common.serial.TypedMessage proxy_settings = 3;
-  int64 expire = 4;
-  string comment = 5;
-  DispatchConfig dispatch_settings = 6;
+  MultiplexingConfig multiplex_settings = 4;
 }
 
 message MultiplexingConfig {
+  // Whether or not Mux is enabled.
   bool enabled = 1;
-}
-
-message DispatchConfig {
-  MultiplexingConfig mux_settings = 1;
-}
-
-message SessionFrame {
-  uint32 id = 1;
-
-  enum FrameCommand {
-    SessionNew = 0;
-    SessionKeep = 1;
-    SessionEnd = 2;
-  }
-
-  FrameCommand command = 2;
-
-  v2ray.core.common.net.Endpoint target = 3;
-  bytes payload = 4;
+  // Max number of concurrent connections that one Mux connection can handle.
+  uint32 concurrency = 2;
 }

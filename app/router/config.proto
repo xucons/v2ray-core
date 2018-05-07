@@ -17,6 +17,8 @@ message Domain {
     Plain = 0;
     // The value is used as a regular expression.
     Regex = 1;
+    // The value is a domain.
+    Domain = 2;
   }
 
   // Domain matching type.
@@ -33,6 +35,24 @@ message CIDR {
 
   // Number of leading ones in the network mask.
   uint32 prefix = 2;
+}
+
+message GeoIP {
+  string country_code = 1;
+  repeated CIDR cidr = 2;
+}
+
+message GeoIPList {
+  repeated GeoIP entry = 1;
+}
+
+message GeoSite {
+  string country_code = 1;
+  repeated Domain domain = 2;
+}
+
+message GeoSiteList{
+  repeated GeoSite entry = 1;
 }
 
 message RoutingRule {
@@ -56,6 +76,9 @@ message Config {
 
     // Resolve to IP if the domain doesn't match any rules.
     IpIfNonMatch = 2;
+
+    // Resolve to IP if any rule requires IP matching.
+    IpOnDemand = 3;
   }
   DomainStrategy domain_strategy = 1;
   repeated RoutingRule rule = 2;

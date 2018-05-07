@@ -1,9 +1,6 @@
 package internet
 
-import (
-	"v2ray.com/core/common/errors"
-	"v2ray.com/core/common/serial"
-)
+import "v2ray.com/core/common/serial"
 
 type ConfigCreator func() interface{}
 
@@ -13,7 +10,9 @@ var (
 )
 
 func RegisterProtocolConfigCreator(protocol TransportProtocol, creator ConfigCreator) error {
-	// TODO: check duplicate
+	if _, found := globalTransportConfigCreatorCache[protocol]; found {
+		return newError("protocol ", TransportProtocol_name[int32(protocol)], " is already registered").AtError()
+	}
 	globalTransportConfigCreatorCache[protocol] = creator
 	return nil
 }
@@ -21,27 +20,27 @@ func RegisterProtocolConfigCreator(protocol TransportProtocol, creator ConfigCre
 func CreateTransportConfig(protocol TransportProtocol) (interface{}, error) {
 	creator, ok := globalTransportConfigCreatorCache[protocol]
 	if !ok {
-		return nil, errors.New("Internet: Unknown transport protocol: ", protocol)
+		return nil, newError("unknown transport protocol: ", protocol)
 	}
 	return creator(), nil
 }
 
-func (v *TransportConfig) GetTypedSettings() (interface{}, error) {
-	return v.Settings.GetInstance()
+func (c *TransportConfig) GetTypedSettings() (interface{}, error) {
+	return c.Settings.GetInstance()
 }
 
-func (v *StreamConfig) GetEffectiveProtocol() TransportProtocol {
-	if v == nil {
+func (c *StreamConfig) GetEffectiveProtocol() TransportProtocol {
+	if c == nil {
 		return TransportProtocol_TCP
 	}
-	return v.Protocol
+	return c.Protocol
 }
 
-func (v *StreamConfig) GetEffectiveTransportSettings() (interface{}, error) {
-	protocol := v.GetEffectiveProtocol()
+func (c *StreamConfig) GetEffectiveTransportSettings() (interface{}, error) {
+	protocol := c.GetEffectiveProtocol()
 
-	if v != nil {
-		for _, settings := range v.TransportSettings {
+	if c != nil {
+		for _, settings := range c.TransportSettings {
 			if settings.Protocol == protocol {
 				return settings.GetTypedSettings()
 			}
@@ -74,17 +73,17 @@ func (c *StreamConfig) GetTransportSettingsFor(protocol TransportProtocol) (inte
 	return CreateTransportConfig(protocol)
 }
 
-func (v *StreamConfig) GetEffectiveSecuritySettings() (interface{}, error) {
-	for _, settings := range v.SecuritySettings {
-		if settings.Type == v.SecurityType {
+func (c *StreamConfig) GetEffectiveSecuritySettings() (interface{}, error) {
+	for _, settings := range c.SecuritySettings {
+		if settings.Type == c.SecurityType {
 			return settings.GetInstance()
 		}
 	}
-	return serial.GetInstance(v.SecurityType)
+	return serial.GetInstance(c.SecurityType)
 }
 
-func (v *StreamConfig) HasSecuritySettings() bool {
-	return len(v.SecurityType) > 0
+func (c *StreamConfig) HasSecuritySettings() bool {
+	return len(c.SecurityType) > 0
 }
 
 func ApplyGlobalTransportSettings(settings []*TransportConfig) error {
@@ -92,6 +91,6 @@ func ApplyGlobalTransportSettings(settings []*TransportConfig) error {
 	return nil
 }
 
-func (v *ProxyConfig) HasTag() bool {
-	return v != nil && len(v.Tag) > 0
+func (c *ProxyConfig) HasTag() bool {
+	return c != nil && len(c.Tag) > 0
 }
